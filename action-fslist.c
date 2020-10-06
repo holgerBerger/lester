@@ -14,6 +14,8 @@
 #include <string.h>
 #include <time.h>
 
+#include <asm/byteorder.h>
+
 enum {
 	FORMAT_NAME,
 	FORMAT_INUM,
@@ -34,12 +36,39 @@ static int accessed_before;
 static int newer_than;
 static FILE *genhit;
 
+
+struct lustre_som_attrs {
+        __u16   lsa_valid;
+        __u16   lsa_reserved[3];
+        __u64   lsa_size;
+        __u64   lsa_blocks;
+};
+
+static void lustre_som_swab(struct lustre_som_attrs *attrs)
+{
+#if __BYTE_ORDER == __BIG_ENDIAN
+        __swab16s(&attrs->lsa_valid);
+        __swab64s(&attrs->lsa_size);
+        __swab64s(&attrs->lsa_blocks);
+#endif
+}
+
 static void report_fid(FILE *f, struct ea_info *lov)
 {
 	struct lustre_mdt_attrs *lma = lov->value;
 	fprintf(f, "0x%lx:0x%x:0x%x", lma->lma_self_fid.f_seq,
 		lma->lma_self_fid.f_oid, lma->lma_self_fid.f_ver);
 }
+
+
+static void report_som(FILE *f, struct ea_info *som)
+{
+	struct lustre_som_attrs *attr = som->value;
+	lustre_som_swab(attr);	
+	fprintf(f, "%u|%llu", attr->lsa_valid, attr->lsa_size);
+}
+
+
 
 static void report_osts(FILE *f, struct ea_info *lov)
 {
@@ -255,7 +284,7 @@ static int fslist_dscan_begin(void)
 
 static int fslist_output(FILE *f, ext2_ino_t ino, struct ext2_inode *inode,
 			 int offset, const char *name, int namelen,
-			 struct ea_info *lov, struct ea_info *lma)
+			 struct ea_info *lov, struct ea_info *lma, struct ea_info *som)
 {
 	if (fslist_format > FORMAT_INUM) {
 		fprintf(f, "%u|%u|%u|%u|%u|%o|%lu|%u", inode->i_atime,
@@ -268,6 +297,9 @@ static int fslist_output(FILE *f, ext2_ino_t ino, struct ext2_inode *inode,
 			fprintf(f, "|");
 			if (lov && LINUX_S_ISREG(inode->i_mode))
 				report_osts(f, lov);
+			fprintf(f, "|");
+			if (som)
+				report_som(f, som);
 		}
 
 		if (show_fid) {
@@ -290,6 +322,7 @@ static int fslist_dscan(ext2_ino_t ino, struct ext2_inode *inode,
 {
 	struct ea_info *lov = NULL;
 	struct ea_info *lma = NULL;
+	struct ea_info *som = NULL;
 	struct ea_info *ea;
 	int requested = 0;
 	int offset;
@@ -320,6 +353,15 @@ static int fslist_dscan(ext2_ino_t ino, struct ext2_inode *inode,
 					requested++;
 				}
 			}
+
+			if (ea->name_len == 3 && !strncmp(ea->name, "som", 3)) {
+				som = ea;
+				if (!ea->value) {
+					ea->requested = 1;
+					requested++;
+				}
+			}
+
 		}
 	}
 
@@ -327,18 +369,18 @@ static int fslist_dscan(ext2_ino_t ino, struct ext2_inode *inode,
 		return ACTION_WANT_READ_ATTRS;
 
 	offset = build_path(parent, 0);
-	fslist_output(outfile, ino, inode, offset, name, namelen, lov, lma);
+	fslist_output(outfile, ino, inode, offset, name, namelen, lov, lma, som);
 
 	if (genhit) {
 		if (accessed_before && (inode->i_atime < cutoff_time &&
 					inode->i_mtime < cutoff_time &&
 					inode->i_ctime < cutoff_time)) {
 			fslist_output(genhit, ino, inode, offset, name,
-				      namelen, lov, lma);
+				      namelen, lov, lma, som);
 		} else if (newer_than && (inode->i_ctime >= cutoff_time ||
 					  inode->i_mtime >= cutoff_time)) {
 			fslist_output(genhit, ino, inode, offset, name,
-				      namelen, lov, lma);
+				      namelen, lov, lma, som);
 		}
 	}
 
